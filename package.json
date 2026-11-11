@@ -1,0 +1,1 @@
+{"name":"reuniqlo-smart-repair","version":"1.0.0","scripts":{"start":"node server.js","test":"node test.js"},"engines":{"node":">=18"}}

@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: reuniqlo-smart-repair
+    runtime: node
+    plan: free
+    startCommand: node server.js
+    healthCheckPath: /healthz
+    envVars:
+      - {key: STAFF_EMAIL, sync: false}
+      - {key: STAFF_PASSCODE, sync: false}
+      - {key: APP_SECRET, generateValue: true}
+      - {key: AI_MODE, value: demo}
+      - {key: EMAIL_MODE, value: demo}
