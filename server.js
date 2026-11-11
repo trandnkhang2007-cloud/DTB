@@ -2,6 +2,7 @@
 const http=require('http'),fs=require('fs'),path=require('path'),crypto=require('crypto');
 try{fs.readFileSync('.env','utf8').split('\n').forEach(l=>{const m=l.match(/^([A-Z_]+)=(.*)$/);if(m&&!process.env[m[1]])process.env[m[1]]=m[2].trim()})}catch{}
 const E=process.env,PORT=E.PORT||3000,STAFF=(E.STAFF_EMAIL||'').toLowerCase(),PASS=E.STAFF_PASSCODE||'demo123',BASE=E.NEXT_PUBLIC_APP_URL||E.RENDER_EXTERNAL_URL||`http://localhost:${PORT}`;
+let ASSETS={};try{ASSETS=require('./assets.js')}catch{}
 const SECRET=E.APP_SECRET||crypto.randomBytes(16).toString('hex');
 const D=E.DATA_DIR||'.';fs.mkdirSync(D+'/data',{recursive:true});fs.mkdirSync(D+'/uploads',{recursive:true});
 if(!/localhost|127\.0\.0\.1/.test(BASE)&&PASS==='demo123'){console.error('Refusing to start on a public URL with the default STAFF_PASSCODE. Set a strong STAFF_PASSCODE.');process.exit(1)}
@@ -119,6 +120,7 @@ http.createServer(async(req,res)=>{try{
     if(l.status==='SENT'||l.status.startsWith('SIMULATED')){c.status='CUSTOMER_NOTIFIED';save()}
     return send(res,200,{status:c.status,emailStatus:l.status,emailError:l.error||null})}
   // static
-  let f=path.join('public',p==='/'?'index.html':p);if(!f.startsWith('public')||!fs.existsSync(f)||fs.statSync(f).isDirectory())return send(res,404,{error:'Not found'});
-  res.writeHead(200,{'Content-Type':MIME[path.extname(f)]||'application/octet-stream'});res.end(fs.readFileSync(f));
+  const k=p==='/'?'index.html':p.slice(1);let A=ASSETS[k];
+  if(A===undefined){const f=path.join('public',k);if(k.includes('..')||!fs.existsSync(f)||fs.statSync(f).isDirectory())return send(res,404,{error:'Not found'});A=fs.readFileSync(f)}
+  res.writeHead(200,{'Content-Type':MIME[path.extname(k)]||'text/plain'});res.end(A);
 }catch(e){send(res,e.message.startsWith('Only')||e.message.includes('5 MB')?400:500,{error:e.message})}}).listen(PORT,()=>console.log(`RE.UNIQLO Smart Repair on ${BASE}  AI:${aiLive()?'LIVE':'DEMO'} EMAIL:${mailLive()?'LIVE':'DEMO'} STAFF:${STAFF||'NOT SET'}`));
