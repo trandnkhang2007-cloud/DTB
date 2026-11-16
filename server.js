@@ -8,6 +8,7 @@ const D=E.DATA_DIR||'.';fs.mkdirSync(D+'/data',{recursive:true});fs.mkdirSync(D+
 if(!/localhost|127\.0\.0\.1/.test(BASE)&&PASS==='demo123'){console.error('Refusing to start on a public URL with the default STAFF_PASSCODE. Set a strong STAFF_PASSCODE.');process.exit(1)}
 if(!E.APP_SECRET)console.warn('Warning: APP_SECRET not set; signed photo links stop working after each restart.');
 const hasClaude=()=>!!E.ANTHROPIC_API_KEY&&!!E.ANTHROPIC_MODEL,useGemini=()=>!hasClaude()&&!!E.GEMINI_API_KEY;
+const TO=+E.GEMINI_TIMEOUT_MS||25000;
 const aiLive=()=>E.AI_MODE==='live'&&(hasClaude()||useGemini());
 const mailLive=()=>E.EMAIL_MODE==='live'&&!!E.RESEND_API_KEY&&!!E.RESEND_FROM_EMAIL;
 // ---- seed data (DEMO records, not official UNIQLO data) ----
@@ -26,9 +27,11 @@ const save=()=>fs.writeFileSync(DB_FILE,JSON.stringify(db,null,1));
 const ev=(c,t,d)=>{(c.events=c.events||[]).push({t,d,at:new Date().toISOString()})};
 // ---- email ----
 async function sendMail(c,type,to,subject,html,text){
-  const log={id:crypto.randomUUID(),caseId:c.id,type,to,subject,html,text,at:new Date().toISOString()};
+  const sandbox=/@resend\.dev$/i.test(E.RESEND_FROM_EMAIL||''),redirect=E.EMAIL_REDIRECT_TO||(sandbox?STAFF:''),real=to;
+  if(mailLive()&&redirect&&to.toLowerCase()!==redirect.toLowerCase()&&to.toLowerCase()!==STAFF){to=redirect;subject=`[DEMO → ${real}] ${subject}`;html=`<div style="background:#fff3cd;padding:8px 12px;font:13px Arial">Demo redirect: this email was addressed to ${esc(real)} but delivered to ${esc(redirect)} because the test sender can only reach the account owner.</div>`+html;text=`[Demo redirect: originally addressed to ${real}]\n`+text}
+  const log={id:crypto.randomUUID(),caseId:c.id,type,to,intendedTo:real,subject,html,text,at:new Date().toISOString()};
   if(!mailLive()){log.status='SIMULATED (EMAIL_MODE=demo — not delivered)'}
-  else try{const r=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:'Bearer '+E.RESEND_API_KEY,'Content-Type':'application/json'},body:JSON.stringify({from:E.RESEND_FROM_EMAIL,to:[to],subject,html,text})});const j=await r.json().catch(()=>({}));if(r.ok){log.status='SENT';log.providerId=j.id}else{log.status='FAILED';log.error=j.message||('HTTP '+r.status)}}catch(e){log.status='FAILED';log.error=e.message}
+  else try{const r=await fetch((E.RESEND_BASE||'https://api.resend.com')+'/emails',{method:'POST',headers:{Authorization:'Bearer '+E.RESEND_API_KEY,'Content-Type':'application/json'},body:JSON.stringify({from:E.RESEND_FROM_EMAIL,to:[to],subject,html,text})});const j=await r.json().catch(()=>({}));if(r.ok){log.status=real!==to?'SENT (redirected to '+to+')':'SENT';log.providerId=j.id}else{log.status='FAILED';log.error=j.message||('HTTP '+r.status)}}catch(e){log.status='FAILED';log.error=e.message}
   db.emails.push(log);ev(c,'email',`${type} → ${to}: ${log.status}${log.error?' ('+log.error+')':''}`);save();return log;}
 const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const vnd=n=>new Intl.NumberFormat('en-US').format(n)+' VND';
@@ -49,14 +52,14 @@ function custMail(c){const d=c.decision,s=store(d.storeId||c.storeId),p=prod(c.p
 // ---- AI assessment ----
 const DEMO={hole:['Small hole','Low','Likely Repairable','High'],seam:['Loose / open seam','Low','Likely Repairable','Medium'],button:['Missing button','Low','Likely Repairable','High'],zipper:['Broken zipper','Medium','Requires In-Store Inspection','Medium'],pilling:['Fabric pilling','Low','Likely Repairable','Medium'],unclear:['Unclear — photo insufficient','Unknown','Requires In-Store Inspection','Low']};
 const ruleFor=(t,m)=>{const r=PRICING[t]||PRICING.unclear;return r.find(x=>x.m===m)||r[0]};
-async function assess(p,imgs,loc,note,scenario){
+async function assess(p,imgs,loc,note,scenario,force){
   const mk=(t,src,extra={})=>{const d=DEMO[t]||DEMO.unclear;return{damageType:d[0],type:t,location:loc||'Unspecified',material:p.material,severity:d[1],evidence:t==='unclear'?'Image too blurry/insufficient':'Demo scenario (no image analysis)',method:PRICING[t][0].m,alt:(PRICING[t][1]||{}).m||null,repairability:d[2],confidence:d[3],inspectionNeeded:d[2]!=='Likely Repairable',uncertainty:'Hidden damage cannot be judged from photos.',...extra}};
-  if(!aiLive())return{source:'DEMO — AI Vision Not Connected (deterministic demo scenario, photos not analysed)',a:mk(PRICING[scenario]?scenario:'unclear')};
+  if(!aiLive()||force)return{source:'DEMO — AI Vision Not Connected (deterministic demo scenario, photos not analysed)',a:mk(PRICING[scenario]?scenario:'unclear')};
   const prompt=`Garment: ${p.name}, ${p.category}, material ${p.material}. Customer location hint: ${loc}. Note: ${note||'none'}.\nImages: full garment, close-up of damage, optional care label. Assess ONLY visible damage. Reply with JSON only: {"type":"hole|seam|button|zipper|pilling|unclear","damageType":str,"location":str,"material":str,"severity":"Low|Medium|High|Unknown","evidence":str,"method":str,"alt":str|null,"repairability":"Likely Repairable|Requires In-Store Inspection|Potentially Not Repairable","confidence":"High|Medium|Low","inspectionNeeded":bool,"uncertainty":str}. If blurry or ambiguous use type "unclear", low confidence, and ask for better photos. Never claim hidden damage.`;
   let txt,src;
   if(useGemini()){
     const m=E.GEMINI_MODEL||'gemini-2.5-flash';
-    const r=await fetch(`${E.GEMINI_BASE||'https://generativelanguage.googleapis.com'}/v1beta/models/${m}:generateContent`,{method:'POST',headers:{'x-goog-api-key':E.GEMINI_API_KEY,'Content-Type':'application/json'},signal:AbortSignal.timeout(60000),body:JSON.stringify({contents:[{parts:[...imgs.map(i=>({inline_data:{mime_type:i.mime,data:i.b64}})),{text:'You are a garment repair triage assistant. Output valid JSON only.\n'+prompt}]}],generationConfig:{responseMimeType:'application/json'}})});
+    const t0=Date.now();const r=await fetch(`${E.GEMINI_BASE||'https://generativelanguage.googleapis.com'}/v1beta/models/${m}:generateContent`,{method:'POST',headers:{'x-goog-api-key':E.GEMINI_API_KEY,'Content-Type':'application/json'},signal:AbortSignal.timeout(TO),body:JSON.stringify({contents:[{parts:[...imgs.map(i=>({inline_data:{mime_type:i.mime,data:i.b64}})),{text:'You are a garment repair triage assistant. Output valid JSON only.\n'+prompt}]}],generationConfig:{responseMimeType:'application/json',...(/^gemini-3/.test(m)?{thinkingConfig:{thinkingLevel:E.GEMINI_THINKING||(/flash-lite/.test(m)?'minimal':'low')}}:{})}})}).catch(e=>{throw new Error(e.name==='TimeoutError'?`Gemini (${m}) did not answer within ${Math.round(TO/1000)}s`:e.message)});console.log('Gemini',m,r.status,Date.now()-t0,'ms');
     const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error?.message||('Gemini API error '+r.status));
     txt=(j.candidates?.[0]?.content?.parts||[]).map(x=>x.text||'').join('');src='LIVE — Gemini Vision ('+m+')';
   }else{
@@ -89,7 +92,7 @@ http.createServer(async(req,res)=>{try{
   if(p==='/api/assess'&&req.method==='POST'){const b=await body(req),pr=prod(b.productId);if(!pr)return send(res,400,{error:'Unknown product'});
     const imgs=(b.images||[]).slice(0,3).map(i=>{const m=/^data:(image\/(?:jpeg|png|webp));base64,(.+)$/.exec(i||'');if(!m)throw new Error('Only JPG, PNG or WEBP images allowed');if(m[2].length>7e6)throw new Error('Image over 5 MB');return{mime:m[1],b64:m[2]}});
     if(imgs.length<2)return send(res,400,{error:'Upload the full garment and a close-up photo'});
-    let r;try{r=await assess(pr,imgs,b.location,String(b.note||'').slice(0,500),b.scenario)}catch(e){return send(res,502,{error:'AI assessment failed: '+e.message})}
+    let r;try{r=await assess(pr,imgs,b.location,String(b.note||'').slice(0,500),b.scenario)}catch(e){if(E.AI_FALLBACK==='off')return send(res,502,{error:'AI assessment failed: '+e.message});console.log('AI fallback:',e.message);r=await assess(pr,imgs,b.location,'','unclear',true);r.source='AI VISION UNAVAILABLE ('+e.message.slice(0,120)+') — NO diagnosis was made. Retry, or continue and staff will inspect in store.';r.a.evidence='No AI analysis was performed.'}
     const opts=PRICING[r.a.type].map(o=>({method:o.m,min:o.min,max:o.max,turnaround:o.d}));return send(res,200,{...r,options:opts})}
   if(p==='/api/cases'&&req.method==='POST'){const b=await body(req),pr=prod(b.productId);
     if(!b.consent)return send(res,400,{error:'Consent is required'});
@@ -128,7 +131,7 @@ http.createServer(async(req,res)=>{try{
     if((dec==='REJECTED'||dec==='INSPECTION')&&!d.notes)return send(res,400,{error:dec==='REJECTED'?'A rejection reason is required':'Inspection instructions are required'});
     c.decision=d;c.status={APPROVED:'APPROVED',INSPECTION:'INSPECTION_REQUIRED',REJECTED:'REJECTED'}[dec];ev(c,'decision',dec+' by '+me);save();
     const[s,h,t]=custMail(c),l=await sendMail(c,'CUSTOMER_DECISION',c.email,s,h,t);
-    if(l.status==='SENT'||l.status.startsWith('SIMULATED')){c.status='CUSTOMER_NOTIFIED';save()}
+    if(l.status.startsWith('SENT')||l.status.startsWith('SIMULATED')){c.status='CUSTOMER_NOTIFIED';save()}
     return send(res,200,{status:c.status,emailStatus:l.status,emailError:l.error||null})}
   // static
   const k=p==='/'?'index.html':p.slice(1);let A=ASSETS[k];
