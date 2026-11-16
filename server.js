@@ -7,7 +7,8 @@ const SECRET=E.APP_SECRET||crypto.randomBytes(16).toString('hex');
 const D=E.DATA_DIR||'.';fs.mkdirSync(D+'/data',{recursive:true});fs.mkdirSync(D+'/uploads',{recursive:true});
 if(!/localhost|127\.0\.0\.1/.test(BASE)&&PASS==='demo123'){console.error('Refusing to start on a public URL with the default STAFF_PASSCODE. Set a strong STAFF_PASSCODE.');process.exit(1)}
 if(!E.APP_SECRET)console.warn('Warning: APP_SECRET not set; signed photo links stop working after each restart.');
-const aiLive=()=>E.AI_MODE==='live'&&!!E.ANTHROPIC_API_KEY&&!!E.ANTHROPIC_MODEL;
+const hasClaude=()=>!!E.ANTHROPIC_API_KEY&&!!E.ANTHROPIC_MODEL,useGemini=()=>!hasClaude()&&!!E.GEMINI_API_KEY;
+const aiLive=()=>E.AI_MODE==='live'&&(hasClaude()||useGemini());
 const mailLive=()=>E.EMAIL_MODE==='live'&&!!E.RESEND_API_KEY&&!!E.RESEND_FROM_EMAIL;
 // ---- seed data (DEMO records, not official UNIQLO data) ----
 const PRODUCTS=[['DEMO-001','AIRism Cotton T-Shirt','Tops','Cotton blend','Smooth stretch tee'],['DEMO-002','Oxford Shirt','Shirts','Cotton','Button-front shirt'],['DEMO-003','Stretch Denim Jeans','Bottoms','Denim','Slim stretch jeans'],['DEMO-004','Lightweight Down Jacket','Outerwear','Nylon / Down','Packable zip jacket'],['DEMO-005','Knit Crew Neck Sweater','Knitwear','Wool blend','Crew neck knit'],['DEMO-006','Supima Cotton T-Shirt','Tops','Cotton','Crew neck tee'],['DEMO-007','Linen Blend Shirt','Shirts','Linen blend','Relaxed linen shirt'],['DEMO-008','Chino Trousers','Bottoms','Cotton twill','Straight chinos'],['DEMO-009','Selvedge Jeans','Bottoms','Denim','Rigid selvedge denim'],['DEMO-010','Fleece Full-Zip Jacket','Outerwear','Polyester fleece','Zip fleece'],['DEMO-011','Merino V-Neck Sweater','Knitwear','Merino wool','V-neck knit'],['DEMO-012','Cotton Cardigan','Knitwear','Cotton','Button cardigan'],['DEMO-013','Blocktech Parka','Outerwear','Nylon','Zip + snap parka'],['DEMO-014','Flannel Shirt','Shirts','Cotton flannel','Brushed check shirt'],['DEMO-015','Ultra Stretch Trousers','Bottoms','Polyester blend','Zip-fly trousers']].map(p=>({id:p[0],name:p[1],category:p[2],material:p[3],description:p[4],image:'/img/'+p[2].toLowerCase()+'.svg'}));
@@ -51,14 +52,24 @@ const ruleFor=(t,m)=>{const r=PRICING[t]||PRICING.unclear;return r.find(x=>x.m==
 async function assess(p,imgs,loc,note,scenario){
   const mk=(t,src,extra={})=>{const d=DEMO[t]||DEMO.unclear;return{damageType:d[0],type:t,location:loc||'Unspecified',material:p.material,severity:d[1],evidence:t==='unclear'?'Image too blurry/insufficient':'Demo scenario (no image analysis)',method:PRICING[t][0].m,alt:(PRICING[t][1]||{}).m||null,repairability:d[2],confidence:d[3],inspectionNeeded:d[2]!=='Likely Repairable',uncertainty:'Hidden damage cannot be judged from photos.',...extra}};
   if(!aiLive())return{source:'DEMO — AI Vision Not Connected (deterministic demo scenario, photos not analysed)',a:mk(PRICING[scenario]?scenario:'unclear')};
-  const content=[...imgs.map(i=>({type:'image',source:{type:'base64',media_type:i.mime,data:i.b64}})),{type:'text',text:`Garment: ${p.name}, ${p.category}, material ${p.material}. Customer location hint: ${loc}. Note: ${note||'none'}.\nImages: full garment, close-up of damage, optional care label. Assess ONLY visible damage. Reply with JSON only: {"type":"hole|seam|button|zipper|pilling|unclear","damageType":str,"location":str,"material":str,"severity":"Low|Medium|High|Unknown","evidence":str,"method":str,"alt":str|null,"repairability":"Likely Repairable|Requires In-Store Inspection|Potentially Not Repairable","confidence":"High|Medium|Low","inspectionNeeded":bool,"uncertainty":str}. If blurry or ambiguous use type "unclear", low confidence, and ask for better photos. Never claim hidden damage.`}];
-  const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'x-api-key':E.ANTHROPIC_API_KEY,'anthropic-version':'2023-06-01','content-type':'application/json'},body:JSON.stringify({model:E.ANTHROPIC_MODEL,max_tokens:900,system:'You are a garment repair triage assistant. Output valid JSON only.',messages:[{role:'user',content}]})});
-  const j=await r.json();if(!r.ok)throw new Error(j.error?.message||'Anthropic API error');
-  const txt=(j.content||[]).map(x=>x.text||'').join(''),a=JSON.parse(txt.slice(txt.indexOf('{'),txt.lastIndexOf('}')+1));
+  const prompt=`Garment: ${p.name}, ${p.category}, material ${p.material}. Customer location hint: ${loc}. Note: ${note||'none'}.\nImages: full garment, close-up of damage, optional care label. Assess ONLY visible damage. Reply with JSON only: {"type":"hole|seam|button|zipper|pilling|unclear","damageType":str,"location":str,"material":str,"severity":"Low|Medium|High|Unknown","evidence":str,"method":str,"alt":str|null,"repairability":"Likely Repairable|Requires In-Store Inspection|Potentially Not Repairable","confidence":"High|Medium|Low","inspectionNeeded":bool,"uncertainty":str}. If blurry or ambiguous use type "unclear", low confidence, and ask for better photos. Never claim hidden damage.`;
+  let txt,src;
+  if(useGemini()){
+    const m=E.GEMINI_MODEL||'gemini-2.5-flash';
+    const r=await fetch(`${E.GEMINI_BASE||'https://generativelanguage.googleapis.com'}/v1beta/models/${m}:generateContent`,{method:'POST',headers:{'x-goog-api-key':E.GEMINI_API_KEY,'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[...imgs.map(i=>({inline_data:{mime_type:i.mime,data:i.b64}})),{text:'You are a garment repair triage assistant. Output valid JSON only.\n'+prompt}]}],generationConfig:{responseMimeType:'application/json'}})});
+    const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error?.message||('Gemini API error '+r.status));
+    txt=(j.candidates?.[0]?.content?.parts||[]).map(x=>x.text||'').join('');src='LIVE — Gemini Vision ('+m+')';
+  }else{
+    const content=[...imgs.map(i=>({type:'image',source:{type:'base64',media_type:i.mime,data:i.b64}})),{type:'text',text:prompt}];
+    const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'x-api-key':E.ANTHROPIC_API_KEY,'anthropic-version':'2023-06-01','content-type':'application/json'},body:JSON.stringify({model:E.ANTHROPIC_MODEL,max_tokens:900,system:'You are a garment repair triage assistant. Output valid JSON only.',messages:[{role:'user',content}]})});
+    const j=await r.json();if(!r.ok)throw new Error(j.error?.message||'Anthropic API error');
+    txt=(j.content||[]).map(x=>x.text||'').join('');src='LIVE — Claude Vision ('+E.ANTHROPIC_MODEL+')';
+  }
+  const a=JSON.parse(txt.slice(txt.indexOf('{'),txt.lastIndexOf('}')+1));
   if(!PRICING[a.type])a.type='unclear';
   if(!['Likely Repairable','Requires In-Store Inspection','Potentially Not Repairable'].includes(a.repairability)||!['High','Medium','Low'].includes(a.confidence))throw new Error('Invalid AI output');
   if(a.confidence==='Low'&&a.repairability==='Likely Repairable')a.repairability='Requires In-Store Inspection';
-  return{source:'LIVE — Claude Vision ('+E.ANTHROPIC_MODEL+')',a};}
+  return{source:src,a};}
 // ---- http helpers ----
 const hits=new Map();const limited=ip=>{const n=Date.now(),a=(hits.get(ip)||[]).filter(t=>n-t<6e4);a.push(n);hits.set(ip,a);return a.length>40};
 const sessions=new Map(),lh=new Map();
@@ -72,7 +83,7 @@ http.createServer(async(req,res)=>{try{
   const u=new URL(req.url,BASE),p=u.pathname,ip=(req.headers['x-forwarded-for']||req.socket.remoteAddress||'').split(',').pop().trim();
   if(p==='/healthz'){res.writeHead(200);return res.end('ok')}
   if(p.startsWith('/api/')&&limited(ip))return send(res,429,{error:'Too many requests'});
-  if(p==='/api/config')return send(res,200,{aiMode:aiLive()?'live':'demo',emailMode:mailLive()?'live':'demo',staffConfigured:!!STAFF,missing:[!aiLive()&&'Anthropic (AI_MODE/ANTHROPIC_API_KEY/ANTHROPIC_MODEL)',!mailLive()&&'Resend (EMAIL_MODE/RESEND_API_KEY/RESEND_FROM_EMAIL)',!STAFF&&'STAFF_EMAIL'].filter(Boolean)});
+  if(p==='/api/config')return send(res,200,{aiMode:aiLive()?'live':'demo',emailMode:mailLive()?'live':'demo',staffConfigured:!!STAFF,missing:[!aiLive()&&'AI (AI_MODE=live + GEMINI_API_KEY, or ANTHROPIC_API_KEY/ANTHROPIC_MODEL)',!mailLive()&&'Resend (EMAIL_MODE/RESEND_API_KEY/RESEND_FROM_EMAIL)',!STAFF&&'STAFF_EMAIL'].filter(Boolean)});
   if(p==='/api/products')return send(res,200,PRODUCTS);
   if(p==='/api/stores'){const m=u.searchParams.get('method'),q=(u.searchParams.get('city')||'').toLowerCase();return send(res,200,STORES.map(s=>({...s,compatible:!m||s.sup.includes(m),near:!!q&&(s.district+s.city).toLowerCase().includes(q)})).sort((a,b)=>(b.compatible-a.compatible)||(b.near-a.near)))}
   if(p==='/api/assess'&&req.method==='POST'){const b=await body(req),pr=prod(b.productId);if(!pr)return send(res,400,{error:'Unknown product'});
