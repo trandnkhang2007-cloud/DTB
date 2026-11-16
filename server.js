@@ -56,7 +56,7 @@ async function assess(p,imgs,loc,note,scenario){
   let txt,src;
   if(useGemini()){
     const m=E.GEMINI_MODEL||'gemini-2.5-flash';
-    const r=await fetch(`${E.GEMINI_BASE||'https://generativelanguage.googleapis.com'}/v1beta/models/${m}:generateContent`,{method:'POST',headers:{'x-goog-api-key':E.GEMINI_API_KEY,'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[...imgs.map(i=>({inline_data:{mime_type:i.mime,data:i.b64}})),{text:'You are a garment repair triage assistant. Output valid JSON only.\n'+prompt}]}],generationConfig:{responseMimeType:'application/json'}})});
+    const r=await fetch(`${E.GEMINI_BASE||'https://generativelanguage.googleapis.com'}/v1beta/models/${m}:generateContent`,{method:'POST',headers:{'x-goog-api-key':E.GEMINI_API_KEY,'Content-Type':'application/json'},signal:AbortSignal.timeout(60000),body:JSON.stringify({contents:[{parts:[...imgs.map(i=>({inline_data:{mime_type:i.mime,data:i.b64}})),{text:'You are a garment repair triage assistant. Output valid JSON only.\n'+prompt}]}],generationConfig:{responseMimeType:'application/json'}})});
     const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error?.message||('Gemini API error '+r.status));
     txt=(j.candidates?.[0]?.content?.parts||[]).map(x=>x.text||'').join('');src='LIVE — Gemini Vision ('+m+')';
   }else{
