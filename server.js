@@ -10,7 +10,9 @@ if(!E.APP_SECRET)console.warn('Warning: APP_SECRET not set; signed photo links s
 const hasClaude=()=>!!E.ANTHROPIC_API_KEY&&!!E.ANTHROPIC_MODEL,useGemini=()=>!hasClaude()&&!!E.GEMINI_API_KEY;
 const TO=+E.GEMINI_TIMEOUT_MS||25000;
 const aiLive=()=>E.AI_MODE==='live'&&(hasClaude()||useGemini());
-const mailLive=()=>E.EMAIL_MODE==='live'&&!!E.RESEND_API_KEY&&!!E.RESEND_FROM_EMAIL;
+const gmailOn=()=>E.EMAIL_PROVIDER==='gmail'&&!!E.GMAIL_USER&&!!E.GMAIL_APP_PASSWORD;
+const mailLive=()=>E.EMAIL_MODE==='live'&&(gmailOn()||(!!E.RESEND_API_KEY&&!!E.RESEND_FROM_EMAIL));
+let _tr;const gmailTransport=()=>_tr||(_tr=require('nodemailer').createTransport((E.GMAIL_SMTP_HOST?{host:E.GMAIL_SMTP_HOST,port:+E.GMAIL_SMTP_PORT||25,secure:false,ignoreTLS:true}:{service:'gmail'}),{auth:{user:E.GMAIL_USER,pass:E.GMAIL_APP_PASSWORD.replace(/\s/g,'')}}));
 // ---- seed data (DEMO records, not official UNIQLO data) ----
 const PRODUCTS=[['DEMO-001','AIRism Cotton T-Shirt','Tops','Cotton blend','Smooth stretch tee'],['DEMO-002','Oxford Shirt','Shirts','Cotton','Button-front shirt'],['DEMO-003','Stretch Denim Jeans','Bottoms','Denim','Slim stretch jeans'],['DEMO-004','Lightweight Down Jacket','Outerwear','Nylon / Down','Packable zip jacket'],['DEMO-005','Knit Crew Neck Sweater','Knitwear','Wool blend','Crew neck knit'],['DEMO-006','Supima Cotton T-Shirt','Tops','Cotton','Crew neck tee'],['DEMO-007','Linen Blend Shirt','Shirts','Linen blend','Relaxed linen shirt'],['DEMO-008','Chino Trousers','Bottoms','Cotton twill','Straight chinos'],['DEMO-009','Selvedge Jeans','Bottoms','Denim','Rigid selvedge denim'],['DEMO-010','Fleece Full-Zip Jacket','Outerwear','Polyester fleece','Zip fleece'],['DEMO-011','Merino V-Neck Sweater','Knitwear','Merino wool','V-neck knit'],['DEMO-012','Cotton Cardigan','Knitwear','Cotton','Button cardigan'],['DEMO-013','Blocktech Parka','Outerwear','Nylon','Zip + snap parka'],['DEMO-014','Flannel Shirt','Shirts','Cotton flannel','Brushed check shirt'],['DEMO-015','Ultra Stretch Trousers','Bottoms','Polyester blend','Zip-fly trousers']].map(p=>({id:p[0],name:p[1],category:p[2],material:p[3],description:p[4],image:'/img/'+p[2].toLowerCase()+'.svg'}));
 const STORES=[{id:'ST-A',name:'RE.UNIQLO STUDIO Demo A',address:'1 Demo Street, Dist. 1, HCMC',city:'Ho Chi Minh City',district:'District 1',contact:'+84 28 0000 0001',hours:'10:00–21:00',sup:['Basic stitching','Button replacement','Seam reinforcement'],limits:'No zipper work'},{id:'ST-B',name:'RE.UNIQLO STUDIO Demo B',address:'2 Demo Avenue, Thu Duc, HCMC',city:'Ho Chi Minh City',district:'Thu Duc',contact:'+84 28 0000 0002',hours:'09:30–21:30',sup:['Basic stitching','Button replacement','Seam reinforcement','Zipper inspection','Zipper replacement'],limits:'Down items: 5+ days'},{id:'ST-C',name:'RE.UNIQLO STUDIO Demo C',address:'3 Demo Road, Dist. 7, HCMC',city:'Ho Chi Minh City',district:'District 7',contact:'+84 28 0000 0003',hours:'10:00–22:00',sup:['Basic stitching','Patch repair','Surface treatment'],limits:'Fabric repair only'}];
@@ -27,16 +29,19 @@ const save=()=>fs.writeFileSync(DB_FILE,JSON.stringify(db,null,1));
 const ev=(c,t,d)=>{(c.events=c.events||[]).push({t,d,at:new Date().toISOString()})};
 // ---- email ----
 async function sendMail(c,type,to,subject,html,text){
-  const sandbox=/@resend\.dev$/i.test(E.RESEND_FROM_EMAIL||''),redirect=E.EMAIL_REDIRECT_TO||(sandbox?STAFF:''),real=to;
+  const sandbox=/@resend\.dev$/i.test(E.RESEND_FROM_EMAIL||''),redirect=gmailOn()?'':(E.EMAIL_REDIRECT_TO||(sandbox?STAFF:'')),real=to;
   if(mailLive()&&redirect&&to.toLowerCase()!==redirect.toLowerCase()&&to.toLowerCase()!==STAFF){to=redirect;subject=`[DEMO → ${real}] ${subject}`;html=`<div style="background:#fff3cd;padding:8px 12px;font:13px Arial">Demo redirect: this email was addressed to ${esc(real)} but delivered to ${esc(redirect)} because the test sender can only reach the account owner.</div>`+html;text=`[Demo redirect: originally addressed to ${real}]\n`+text}
   const log={id:crypto.randomUUID(),caseId:c.id,type,to,intendedTo:real,subject,html,text,at:new Date().toISOString()};
   if(!mailLive()){log.status='SIMULATED (EMAIL_MODE=demo — not delivered)'}
+  else if(gmailOn()){try{const i=await gmailTransport().sendMail({from:`RE.UNIQLO Smart Repair <${E.GMAIL_USER}>`,to,subject,html,text});log.status='SENT';log.providerId=i.messageId}catch(e){log.status='FAILED';log.error=e.message}}
   else try{const r=await fetch((E.RESEND_BASE||'https://api.resend.com')+'/emails',{method:'POST',headers:{Authorization:'Bearer '+E.RESEND_API_KEY,'Content-Type':'application/json'},body:JSON.stringify({from:E.RESEND_FROM_EMAIL,to:[to],subject,html,text})});const j=await r.json().catch(()=>({}));if(r.ok){log.status=real!==to?'SENT (redirected to '+to+')':'SENT';log.providerId=j.id}else{log.status='FAILED';log.error=j.message||('HTTP '+r.status)}}catch(e){log.status='FAILED';log.error=e.message}
   db.emails.push(log);ev(c,'email',`${type} → ${to}: ${log.status}${log.error?' ('+log.error+')':''}`);save();return log;}
 const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const vnd=n=>new Intl.NumberFormat('en-US').format(n)+' VND';
 const wrap=b=>`<div style="font-family:Helvetica,Arial,sans-serif;max-width:600px;margin:auto;color:#222"><div style="background:#E60012;color:#fff;padding:16px 24px;font-weight:bold">RE.UNIQLO Smart Repair <small>(demo prototype)</small></div><div style="padding:24px;border:1px solid #eee">${b}</div></div>`;
 const photoUrl=(c,i,ttl=7*864e5)=>{const exp=Date.now()+ttl,sig=crypto.createHmac('sha256',SECRET).update(c.id+i+exp).digest('hex').slice(0,32);return `${BASE}/photo/${c.id}/${i}?exp=${exp}&sig=${sig}`};
+const ccList=c=>(E.CUSTOMER_CC||'').split(',').map(x=>x.trim()).filter(x=>/^\S+@\S+\.\S+$/.test(x)&&x.toLowerCase()!==c.email.toLowerCase());
+async function sendCC(c,s,h,t){const out=[];for(const a of ccList(c)){const l=await sendMail(c,'CUSTOMER_DECISION_CC',a,s,h,t);out.push(a+': '+l.status+(l.error?' ('+l.error+')':''))}return out.join('; ')}
 const store=id=>STORES.find(s=>s.id===id);
 const prod=id=>PRODUCTS.find(p=>p.id===id);
 function staffMail(c){const p=prod(c.productId),a=c.ai,s=store(c.storeId);
@@ -86,7 +91,7 @@ http.createServer(async(req,res)=>{try{
   const u=new URL(req.url,BASE),p=u.pathname,ip=(req.headers['x-forwarded-for']||req.socket.remoteAddress||'').split(',').pop().trim();
   if(p==='/healthz'){res.writeHead(200);return res.end('ok')}
   if(p.startsWith('/api/')&&limited(ip))return send(res,429,{error:'Too many requests'});
-  if(p==='/api/config')return send(res,200,{aiMode:aiLive()?'live':'demo',emailMode:mailLive()?'live':'demo',staffConfigured:!!STAFF,missing:[!aiLive()&&'AI (AI_MODE=live + GEMINI_API_KEY, or ANTHROPIC_API_KEY/ANTHROPIC_MODEL)',!mailLive()&&'Resend (EMAIL_MODE/RESEND_API_KEY/RESEND_FROM_EMAIL)',!STAFF&&'STAFF_EMAIL'].filter(Boolean)});
+  if(p==='/api/config')return send(res,200,{aiMode:aiLive()?'live':'demo',emailMode:mailLive()?'live':'demo',staffConfigured:!!STAFF,missing:[!aiLive()&&'AI (AI_MODE=live + GEMINI_API_KEY, or ANTHROPIC_API_KEY/ANTHROPIC_MODEL)',!mailLive()&&'Email (EMAIL_MODE=live + EMAIL_PROVIDER=gmail/GMAIL_USER/GMAIL_APP_PASSWORD, or RESEND_*)',!STAFF&&'STAFF_EMAIL'].filter(Boolean)});
   if(p==='/api/products')return send(res,200,PRODUCTS);
   if(p==='/api/stores'){const m=u.searchParams.get('method'),q=(u.searchParams.get('city')||'').toLowerCase();return send(res,200,STORES.map(s=>({...s,compatible:!m||s.sup.includes(m),near:!!q&&(s.district+s.city).toLowerCase().includes(q)})).sort((a,b)=>(b.compatible-a.compatible)||(b.near-a.near)))}
   if(p==='/api/assess'&&req.method==='POST'){const b=await body(req),pr=prod(b.productId);if(!pr)return send(res,400,{error:'Unknown product'});
@@ -121,7 +126,7 @@ http.createServer(async(req,res)=>{try{
     if(p==='/api/staff/outbox')return send(res,200,db.emails.slice().reverse().map(({html,...e})=>e));
     const m=/^\/api\/staff\/cases\/([^/]+)(\/(decide|resend|open))?$/.exec(p);const c=m&&db.cases.find(x=>x.id===m[1]);if(!c)return send(res,404,{error:'Case not found'});
     if(!m[3]){if(c.status==='SUBMITTED_TO_STAFF'){c.status='UNDER_STAFF_REVIEW';ev(c,'review','Opened by '+me);save()}return send(res,200,full(c))}
-    if(m[3]==='resend'){if(!c.decision)return send(res,400,{error:'No decision yet'});const[s,h,t]=custMail(c),l=await sendMail(c,'CUSTOMER_DECISION_RETRY',c.email,s,h,t);return send(res,200,{emailStatus:l.status,emailError:l.error||null})}
+    if(m[3]==='resend'){if(!c.decision)return send(res,400,{error:'No decision yet'});const[s,h,t]=custMail(c),l=await sendMail(c,'CUSTOMER_DECISION_RETRY',c.email,s,h,t),cc=await sendCC(c,s,h,t);return send(res,200,{emailStatus:l.status,emailError:l.error||null,ccStatus:cc})}
     if(m[3]==='open'){const[s,h,t]=staffMail(c),l=await sendMail(c,'STAFF_NEW_REQUEST_RETRY',STAFF,s,h,t);return send(res,200,{emailStatus:l.status,emailError:l.error||null})}
     const b=await body(req),dec=b.decision;if(!['APPROVED','INSPECTION','REJECTED'].includes(dec))return send(res,400,{error:'Choose a decision'});
     if(c.decision&&c.status==='CUSTOMER_NOTIFIED')return send(res,409,{error:'Customer already notified for this case. Use resend if delivery failed.'});
@@ -132,7 +137,7 @@ http.createServer(async(req,res)=>{try{
     c.decision=d;c.status={APPROVED:'APPROVED',INSPECTION:'INSPECTION_REQUIRED',REJECTED:'REJECTED'}[dec];ev(c,'decision',dec+' by '+me);save();
     const[s,h,t]=custMail(c),l=await sendMail(c,'CUSTOMER_DECISION',c.email,s,h,t);
     if(l.status.startsWith('SENT')||l.status.startsWith('SIMULATED')){c.status='CUSTOMER_NOTIFIED';save()}
-    return send(res,200,{status:c.status,emailStatus:l.status,emailError:l.error||null})}
+    const cc=await sendCC(c,s,h,t);return send(res,200,{status:c.status,emailStatus:l.status,emailError:l.error||null,ccStatus:cc})}
   // static
   const k=p==='/'?'index.html':p.slice(1);let A=ASSETS[k];
   if(A===undefined){const f=path.join('public',k);if(k.includes('..')||!fs.existsSync(f)||fs.statSync(f).isDirectory())return send(res,404,{error:'Not found'});A=fs.readFileSync(f)}
